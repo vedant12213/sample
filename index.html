@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Modern PDF Viewer</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.11.338/pdf.min.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        }
+
+        body {
+            background: #1a1a1a;
+            color: #ffffff;
+        }
+
+        .container {
+            display: grid;
+            grid-template-columns: 250px 1fr;
+            height: 100vh;
+        }
+
+        .sidebar {
+            background: #2a2a2a;
+            padding: 20px;
+            overflow-y: auto;
+        }
+
+        .main-content {
+            position: relative;
+            padding: 20px;
+            overflow-y: auto;
+        }
+
+        .toolbar {
+            display: flex;
+            gap: 10px;
+            padding: 15px;
+            background: #333;
+            border-bottom: 1px solid #444;
+        }
+
+        .btn {
+            padding: 8px 15px;
+            background: #4CAF50;
+            border: none;
+            color: white;
+            border-radius: 4px;
+            cursor: pointer;
+            transition: background 0.3s;
+        }
+
+        .btn:hover {
+            background: #45a049;
+        }
+
+        .page-container {
+            margin: 20px auto;
+            box-shadow: 0 0 15px rgba(0,0,0,0.3);
+            background: white;
+        }
+
+        .thumbnail {
+            margin-bottom: 10px;
+            cursor: pointer;
+            transition: transform 0.2s;
+            border: 2px solid transparent;
+        }
+
+        .thumbnail:hover {
+            transform: scale(1.05);
+        }
+
+        .thumbnail.active {
+            border-color: #4CAF50;
+        }
+
+        .search-box {
+            padding: 8px;
+            border-radius: 4px;
+            border: 1px solid #444;
+            background: #333;
+            color: white;
+        }
+
+        .zoom-controls {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .page-navigation {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .page-input {
+            width: 60px;
+            padding: 5px;
+            border-radius: 4px;
+            border: 1px solid #444;
+            background: #333;
+            color: white;
+        }
+
+        .loading {
+            display: none;
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: #4CAF50;
+            font-size: 1.5em;
+        }
+    </style>
+</head>
+<body>
+    <div class="loading">Loading...</div>
+    <div class="container">
+        <div class="sidebar" id="thumbnail-container"></div>
+        <div class="main-content">
+            <div class="toolbar">
+                <input type="file" id="file-input" accept=".pdf" class="btn">
+                <div class="page-navigation">
+                    <button class="btn" id="prev-page">Previous</button>
+                    <input type="number" class="page-input" id="current-page">
+                    <span>/</span>
+                    <span id="total-pages">0</span>
+                    <button class="btn" id="next-page">Next</button>
+                </div>
+                <div class="zoom-controls">
+                    <button class="btn" id="zoom-in">+</button>
+                    <button class="btn" id="zoom-out">-</button>
+                </div>
+                <input type="text" class="search-box" id="search-input" placeholder="Search...">
+                <button class="btn" id="search-btn">Search</button>
+            </div>
+            <div id="pdf-container"></div>
+        </div>
+    </div>
+
+    <script>
+        let pdfDoc = null;
+        let currentPage = 1;
+        let zoomLevel = 1;
+        let searchTerm = '';
+        let searchMatches = [];
+        let currentMatch = 0;
+
+        // Initialize PDF.js worker
+        pdfjsLib.GlobalWorkerOptions.workerSrc = 
+            'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.11.338/pdf.worker.min.js';
+
+        document.getElementById('file-input').addEventListener('change', handleFileSelect);
+        document.getElementById('prev-page').addEventListener('click', () => changePage(-1));
+        document.getElementById('next-page').addEventListener('click', () => changePage(1));
+        document.getElementById('zoom-in').addEventListener('click', () => changeZoom(0.2));
+        document.getElementById('zoom-out').addEventListener('click', () => changeZoom(-0.2));
+        document.getElementById('current-page').addEventListener('change', gotoPage);
+        document.getElementById('search-btn').addEventListener('click', performSearch);
+
+        async function handleFileSelect(event) {
+            const file = event.target.files[0];
+            if (!file) return;
+
+            document.querySelector('.loading').style.display = 'block';
+            const reader = new FileReader();
+            reader.onload = async (e) => {
+                const buffer = e.target.result;
+                pdfDoc = await pdfjsLib.getDocument({ data: buffer }).promise;
+                document.getElementById('total-pages').textContent = pdfDoc.numPages;
+                renderPage(currentPage);
+                renderThumbnails();
+                document.querySelector('.loading').style.display = 'none';
+            };
+            reader.readAsArrayBuffer(file);
+        }
+
+        async function renderPage(num) {
+            const page = await pdfDoc.getPage(num);
+            const viewport = page.getViewport({ scale: zoomLevel });
+            const canvas = document.createElement('canvas');
+            const context = canvas.getContext('2d');
+            
+            canvas.height = viewport.height;
+            canvas.width = viewport.width;
+            
+            const renderContext = {
+                canvasContext: context,
+                viewport: viewport
+            };
+            
+            await page.render(renderContext).promise;
+            
+            const container = document.getElementById('pdf-container');
+            container.innerHTML = '';
+            container.appendChild(canvas);
+            
+            document.getElementById('current-page').value = num;
+            updateActiveThumbnail(num);
+        }
+
+        async function renderThumbnails() {
+            const container = document.getElementById('thumbnail-container');
+            container.innerHTML = '';
+            
+            for (let i = 1; i <= pdfDoc.numPages; i++) {
+                const page = await pdfDoc.getPage(i);
+                const viewport = page.getViewport({ scale: 0.2 });
+                const canvas = document.createElement('canvas');
+                const context = canvas.getContext('2d');
+                
+                canvas.height = viewport.height;
+                canvas.width = viewport.width;
+                canvas.className = `thumbnail ${i === currentPage ? 'active' : ''}`;
+                canvas.onclick = () => gotoPage(i);
+                
+                const renderContext = {
+                    canvasContext: context,
+                    viewport: viewport
+                };
+                
+                await page.render(renderContext).promise;
+                container.appendChild(canvas);
+            }
+        }
+
+        function changePage(offset) {
+            const newPage = currentPage + offset;
+            if (newPage > 0 && newPage <= pdfDoc.numPages) {
+                currentPage = newPage;
+                renderPage(currentPage);
+            }
+        }
+
+        function gotoPage() {
+            const page = parseInt(document.getElementById('current-page').value);
+            if (page > 0 && page <= pdfDoc.numPages) {
+                currentPage = page;
+                renderPage(currentPage);
+            }
+        }
+
+        function changeZoom(amount) {
+            zoomLevel = Math.min(Math.max(zoomLevel + amount, 0.5), 3);
+            renderPage(currentPage);
+        }
+
+        function updateActiveThumbnail(pageNum) {
+            document.querySelectorAll('.thumbnail').forEach(thumb => {
+                thumb.classList.remove('active');
+                if (thumb === document.querySelectorAll('.thumbnail')[pageNum - 1]) {
+                    thumb.classList.add('active');
+                }
+            });
+        }
+
+        async function performSearch() {
+            searchTerm = document.getElementById('search-input').value.toLowerCase();
+            if (!searchTerm) return;
+
+            searchMatches = [];
+            currentMatch = 0;
+
+            for (let i = 1; i <= pdfDoc.numPages; i++) {
+                const page = await pdfDoc.getPage(i);
+                const textContent = await page.getTextContent();
+                const textItems = textContent.items.map(item => item.str).join(' ');
+                if (textItems.toLowerCase().includes(searchTerm)) {
+                    searchMatches.push(i);
+                }
+            }
+
+            if (searchMatches.length > 0) {
+                currentPage = searchMatches[0];
+                renderPage(currentPage);
+                alert(`Found ${searchMatches.length} matches`);
+            } else {
+                alert('No matches found');
+            }
+        }
+    </script>
+</body>
+</html>
